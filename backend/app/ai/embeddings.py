@@ -34,6 +34,37 @@ class EmbeddingService:
         )
         
         return float(similarity)
+    
+    def calculate_similarity_to_description(
+        self,
+        review_text: str,
+        product_description: str,
+        keypoints: List[str] = None
+    ) -> float:
+        """
+        Calculate enhanced semantic similarity between review and product.
+        Combines product description and keypoints for better matching.
+        """
+        if not product_description and not keypoints:
+            return 0.0
+        
+        review_embedding = self.get_embedding(review_text)
+        
+        # Combine description and keypoints
+        product_text_parts = []
+        if product_description:
+            product_text_parts.append(product_description)
+        if keypoints:
+            product_text_parts.append(" ".join(keypoints))
+        
+        product_text = " ".join(product_text_parts)
+        product_embedding = self.get_embedding(product_text)
+        
+        similarity = np.dot(review_embedding, product_embedding) / (
+            np.linalg.norm(review_embedding) * np.linalg.norm(product_embedding)
+        )
+        
+        return float(similarity)
 
 # Global embedding service instance
 _embedding_service = None
