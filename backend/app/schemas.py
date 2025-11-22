@@ -23,8 +23,8 @@ class ReviewAnalysisResult(BaseModel):
     suggested_automatic_response: str
 
 class ProductResponse(BaseModel):
-    id: str
-    store_id: str
+    id: UUID
+    store_id: UUID
     title: str
     description: str
     long_description: Optional[str]
