@@ -153,10 +153,18 @@ DO NOT include markdown. DO NOT include natural language outside the JSON."""
             return False
         
         text_clean = text.lower().strip()
-        if len(text_clean) < 20:
+        
+        # Very short reviews are more likely to be generic
+        if len(text_clean) < 30:
             for pattern in self.generic_positive_patterns:
                 if re.match(pattern, text_clean, re.IGNORECASE):
                     return True
+            
+            # Additional check: if it's just one or two words and 5 stars, likely generic
+            word_count = len(text_clean.split())
+            if word_count <= 3:
+                return True
+        
         return False
     
     def _match_keypoints(self, review_text: str, keypoints: List[str], description: str) -> List[str]:
@@ -210,6 +218,7 @@ DO NOT include markdown. DO NOT include natural language outside the JSON."""
         product_description: str
     ) -> str:
         review_lower = review_text.lower()
+        text_length = len(review_text)
         
         # CATEGORY 3: Support - highest priority
         if has_support_keywords and rating <= 3:
@@ -219,20 +228,39 @@ DO NOT include markdown. DO NOT include natural language outside the JSON."""
         if self._contradicts_description(review_text, product_description):
             return "rejected"
         
-        if len(matched_points) == 0 and len(review_text) > 50:
+        # Improved relevance check: consider both length and matched points
+        if len(matched_points) == 0 and text_length > 100:
             # Long review with no matched keypoints might be irrelevant
+            # But only reject if it's also very negative
             if rating <= 2:
                 return "rejected"
         
-        # CATEGORY 4: Shadow - generic 5-star reviews
+        # CATEGORY 4: Shadow - generic 5-star reviews ONLY if truly generic
+        # Don't shadow-ban reviews that are detailed even if they're positive
         if is_generic and rating == 5:
-            return "shadow"
+            # Extra check: if review has matched keypoints, it's not truly generic
+            if len(matched_points) == 0:
+                return "shadow"
         
         # CATEGORY 1 & 2: Public positive or negative
-        if rating >= 4 or 'positive' in sentiment_label:
+        # Improved logic: use both rating and sentiment
+        if rating >= 4:
+            # High rating reviews
+            if 'negative' in sentiment_label and sentiment_score > 0.7:
+                # Mixed review: high rating but negative sentiment (confusion or sarcasm)
+                # Treat carefully - publish as positive but could be reviewed
+                return "public_positive"
             return "public_positive"
-        else:
+        elif rating <= 2:
+            # Low rating reviews
             return "public_negative"
+        else:
+            # Rating = 3 (neutral)
+            # Use sentiment to decide
+            if 'positive' in sentiment_label:
+                return "public_positive"
+            else:
+                return "public_negative"
     
     def _contradicts_description(self, review_text: str, product_description: str) -> bool:
         # Simple contradiction detection

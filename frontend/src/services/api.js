@@ -12,7 +12,9 @@ const api = axios.create({
 export const productAPI = {
   getAll: () => api.get('/products'),
   getById: (id) => api.get(`/products/${id}`),
-  getReviews: (id, tab = 'positive') => api.get(`/products/${id}/reviews/public?tab=${tab}`),
+  getReviews: (id, tab = 'positive', includeShadow = false) => 
+    api.get(`/products/${id}/reviews/public?tab=${tab}&include_shadow=${includeShadow}`),
+  getRating: (id) => api.get(`/products/${id}/rating`),
 }
 
 export const reviewAPI = {

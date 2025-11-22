@@ -7,12 +7,14 @@ import ReviewTabs from '../components/ReviewTabs'
 function ProductPage() {
   const { id } = useParams()
   const [product, setProduct] = useState(null)
+  const [rating, setRating] = useState(null)
   const [loading, setLoading] = useState(true)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
 
   useEffect(() => {
     loadProduct()
-  }, [id])
+    loadRating()
+  }, [id, refreshTrigger])
 
   const loadProduct = async () => {
     try {
@@ -22,6 +24,15 @@ function ProductPage() {
       console.error('Error loading product:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadRating = async () => {
+    try {
+      const response = await productAPI.getRating(id)
+      setRating(response.data)
+    } catch (error) {
+      console.error('Error loading rating:', error)
     }
   }
 
@@ -60,6 +71,37 @@ function ProductPage() {
           <h1 className="text-4xl font-bold text-gray-900 mb-4">
             {product.title}
           </h1>
+          
+          {rating && rating.total_reviews > 0 && (
+            <div className="mb-4 p-4 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg border border-blue-200">
+              <div className="flex items-center space-x-4">
+                <div>
+                  <div className="text-4xl font-bold text-blue-600">
+                    {rating.weighted_rating.toFixed(1)}
+                  </div>
+                  <div className="text-xs text-gray-600">Weighted Rating</div>
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center space-x-2 mb-1">
+                    <div className="text-yellow-500 text-xl">
+                      {'⭐'.repeat(Math.round(rating.weighted_rating))}
+                    </div>
+                  </div>
+                  <div className="text-sm text-gray-700">
+                    Based on {rating.total_reviews} review{rating.total_reviews !== 1 ? 's' : ''}
+                  </div>
+                  <div className="text-xs text-gray-600">
+                    {(rating.positive_ratio * 100).toFixed(0)}% positive • 
+                    Confidence: {(rating.confidence_score * 100).toFixed(0)}%
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2 text-xs text-gray-500">
+                🤖 AI-weighted: Detailed, specific reviews have more influence
+              </div>
+            </div>
+          )}
+          
           <p className="text-3xl font-bold text-blue-600 mb-6">
             ${product.price} {product.currency}
           </p>

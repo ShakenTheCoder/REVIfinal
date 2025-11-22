@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, desc
+from sqlalchemy import and_, desc, or_
 from typing import List
 from uuid import UUID
 import uuid
@@ -10,7 +10,8 @@ from ..models import Product, BaseReview, ReviewAnalysis, PublishedReview, User,
 from ..schemas import ProductResponse, ReviewSubmission, PublicReviewResponse
 from ..ai.classifier import get_classifier
 from ..ai.embeddings import get_embedding_service
-from ..utils.scoring import calculate_value_score
+from ..ai.insights import get_insights_generator
+from ..utils.scoring import calculate_value_score, calculate_weighted_product_rating
 
 router = APIRouter()
 
@@ -32,10 +33,47 @@ async def get_product(product_id: str, db: Session = Depends(get_db)):
     
     return product
 
+@router.get("/products/{product_id}/rating")
+async def get_product_rating(product_id: str, db: Session = Depends(get_db)):
+    """Get weighted product rating based on all reviews."""
+    try:
+        product_uuid = UUID(product_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid product ID format")
+    
+    # Get all reviews for the product
+    results = db.query(
+        BaseReview,
+        ReviewAnalysis,
+        PublishedReview
+    ).join(
+        ReviewAnalysis, BaseReview.id == ReviewAnalysis.review_id
+    ).outerjoin(
+        PublishedReview, BaseReview.id == PublishedReview.review_id
+    ).filter(
+        BaseReview.product_id == product_uuid
+    ).all()
+    
+    reviews_data = []
+    for base_review, analysis, pub_review in results:
+        reviews_data.append({
+            'rating': base_review.rating,
+            'value_score': float(analysis.value_score) if analysis.value_score else 0,
+            'category': analysis.category,
+            'is_shadow': pub_review.is_shadow if pub_review else False,
+            'is_verified_purchase': base_review.is_verified_purchase
+        })
+    
+    # Calculate weighted rating
+    rating_info = calculate_weighted_product_rating(reviews_data, include_shadow=True)
+    
+    return rating_info
+
 @router.get("/products/{product_id}/reviews/public")
 async def get_public_reviews(
     product_id: str,
     tab: str = "positive",
+    include_shadow: bool = False,
     db: Session = Depends(get_db)
 ):
     try:
@@ -56,15 +94,32 @@ async def get_public_reviews(
         BaseReview.product_id == product_uuid
     )
     
-    # Filter by tab
+    # Filter by tab - now includes shadow reviews integrated into regular tabs
     if tab == "positive":
-        query = query.filter(
-            and_(
-                ReviewAnalysis.category == "public_positive",
-                PublishedReview.is_shadow == False
+        if include_shadow:
+            # Include both regular positive and shadow positive reviews
+            query = query.filter(
+                or_(
+                    and_(
+                        ReviewAnalysis.category == "public_positive",
+                        PublishedReview.is_shadow == False
+                    ),
+                    and_(
+                        ReviewAnalysis.category == "shadow",
+                        PublishedReview.is_shadow == True
+                    )
+                )
             )
-        )
+        else:
+            # Only regular positive reviews
+            query = query.filter(
+                and_(
+                    ReviewAnalysis.category == "public_positive",
+                    PublishedReview.is_shadow == False
+                )
+            )
     elif tab == "negative":
+        # Negative reviews (shadow reviews are typically positive, so this stays the same)
         query = query.filter(
             and_(
                 ReviewAnalysis.category == "public_negative",
@@ -75,10 +130,18 @@ async def get_public_reviews(
         query = query.filter(PublishedReview.is_shadow == True)
     else:
         # All public reviews
-        query = query.filter(PublishedReview.is_shadow == False)
+        if include_shadow:
+            # Include everything except rejected
+            pass  # No additional filter
+        else:
+            query = query.filter(PublishedReview.is_shadow == False)
     
-    # Order by value score
-    query = query.order_by(desc(ReviewAnalysis.value_score))
+    # Order by value score (shadow reviews will naturally rank lower due to scoring)
+    # Then by is_shadow to ensure non-shadow reviews appear first when scores are equal
+    query = query.order_by(
+        desc(ReviewAnalysis.value_score),
+        PublishedReview.is_shadow.asc()
+    )
     
     results = query.all()
     
@@ -94,21 +157,22 @@ async def get_public_reviews(
             "automatic_response": pub_review.automatic_response,
             "value_score": float(analysis.value_score) if analysis.value_score else 0,
             "helpful_count": pub_review.helpful_count,
-            "category": analysis.category
+            "category": analysis.category,
+            "is_shadow": pub_review.is_shadow
         })
     
-    # Generate summary for negative reviews
-    summary = None
-    if tab == "negative" and reviews:
-        summary = {
-            "title": "Common Issues",
-            "count": len(reviews),
-            "top_issues": _extract_top_issues(reviews)
-        }
+    # Generate AI insights for positive and negative reviews
+    insights = None
+    insights_generator = get_insights_generator()
+    
+    if tab == "positive" and reviews:
+        insights = insights_generator.generate_insights(reviews, category='positive')
+    elif tab == "negative" and reviews:
+        insights = insights_generator.generate_insights(reviews, category='negative')
     
     return {
         "reviews": reviews,
-        "summary": summary,
+        "insights": insights,
         "total": len(reviews)
     }
 
@@ -168,11 +232,15 @@ async def submit_review(
         is_verified_purchase=review.is_verified_purchase
     )
     
-    # Calculate semantic similarity for scoring
-    semantic_similarity = embedding_service.calculate_similarity_to_keypoints(
+    # Calculate enhanced semantic similarity (includes product description)
+    semantic_similarity = embedding_service.calculate_similarity_to_description(
         review.review_text,
+        product.long_description or product.description,
         product.keypoints or []
     )
+    
+    # Determine if this will be a shadow review
+    is_shadow = classification_result["category"] == "shadow"
     
     # Calculate value score
     matched_keypoints = classification_result["matched_description_points"]
@@ -185,7 +253,8 @@ async def submit_review(
         matched_keypoints=matched_keypoints,
         is_verified_purchase=review.is_verified_purchase,
         sentiment_score=sentiment_score,
-        semantic_similarity=semantic_similarity
+        semantic_similarity=semantic_similarity,
+        is_shadow=is_shadow
     )
     
     # Create review analysis
@@ -294,14 +363,3 @@ async def submit_review(
         "message": "Review has been processed.",
         "category": category
     }
-
-def _extract_top_issues(reviews: List[dict]) -> List[str]:
-    """Extract common issues from negative reviews."""
-    issues = []
-    for review in reviews[:3]:  # Top 3 negative reviews
-        text = review["review_text"]
-        if len(text) > 100:
-            issues.append(text[:100] + "...")
-        else:
-            issues.append(text)
-    return issues
